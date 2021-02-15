@@ -5,8 +5,65 @@ from scene_generation.bilinear import crop_bbox_batch
 from scene_generation.generators import mask_net, AppearanceEncoder, define_G
 from scene_generation.graph import GraphTripleConv, GraphTripleConvNet
 from scene_generation.layers import build_mlp
-from scene_generation.layout import masks_to_layout
+from scene_generation.layout import boxes_to_layout, masks_to_layout
 from scene_generation.utils import VectorPool
+from scene_generation.jitter import jitter_bbox, jitter_features
+import torch.nn.functional as F
+
+def get_cropped_objs(imgs, boxes, obj_to_img, box_keeps, feats_keeps, evaluating):
+    cropped_objs = []
+    generated = torch.zeros([obj_to_img.size(0)], device=obj_to_img.device, dtype=obj_to_img.dtype)
+    features_mask = imgs[:, 3:4, :, :].clone()  # zeros
+
+    assert (imgs[:, 3, :, :].sum() == 0)
+
+    for i in range(obj_to_img.size(0)):
+        # first, find all the dropped regions and create a mask
+        left = (boxes[i, 0] * imgs.size(3)).type(torch.int32)
+        right = (boxes[i, 2] * imgs.size(3)).type(torch.int32)
+        top = (boxes[i, 1] * imgs.size(2)).type(torch.int32)
+        bottom = (boxes[i, 3] * imgs.size(2)).type(torch.int32)
+
+        # currently test-time modifications are applied on the first object!
+        if evaluating:
+            if i == 0:
+                imgs[obj_to_img[i], 3, top:bottom, left:right] = 1
+                generated[i] = 1
+        else:
+            if box_keeps[i, 0] == 0 or feats_keeps[i, 0] == 0:  # and not i < obj_to_img.size(0)-1:
+                # create mask for future use (masking in the image branch)
+                imgs[obj_to_img[i], 3, top:bottom, left:right] = 1
+                generated[i] = 1
+                # if only the features are dropped then remove a patch from the image
+                if feats_keeps[i, 0] == 0:
+                    features_mask[obj_to_img[i], :, top:bottom, left:right] = 1
+
+    # put gray as a mask over the image when things are dropped
+    # imgs_masked = imgs[:, :3, :, :] * (1 - imgs[:, 3:4, :, :]) + 0.5 * imgs[:, 3:4, :, :]
+    # FIX
+    imgs_masked = imgs[:, :3, :, :] * (1 - features_mask) + 0.5 * features_mask
+
+    for i in range(obj_to_img.size(0)):
+        left = (boxes[i, 0] * imgs.size(3)).type(torch.int32)
+        right = (boxes[i, 2] * imgs.size(3)).type(torch.int32)
+        top = (boxes[i, 1] * imgs.size(2)).type(torch.int32)
+        bottom = (boxes[i, 3] * imgs.size(2)).type(torch.int32)
+
+        # crop all objects
+        try:
+            obj = imgs_masked[obj_to_img[i]:obj_to_img[i] + 1, :3, top:bottom, left:right]
+            obj = F.upsample(obj, size=(imgs.size(2), imgs.size(3)), mode='bilinear', align_corners=True)
+        except:
+            # some corner case?
+            obj = torch.zeros([1, imgs.size(1) - 1, imgs.size(2), imgs.size(3)], dtype=imgs.dtype,
+                              device=imgs.device)
+
+        cropped_objs.append(obj)
+
+    cropped_objs = torch.cat(cropped_objs, 0)
+    generated = generated > 0
+
+    return cropped_objs, imgs, generated
 
 
 class Model(nn.Module):
@@ -24,10 +81,11 @@ class Model(nn.Module):
         self.use_attributes = use_attributes
         self.box_noise_dim = box_noise_dim
         self.mask_noise_dim = mask_noise_dim
-        self.object_size = 64
+        self.object_size = 64 #was 64 azade
         self.fake_pool = VectorPool(pool_size)
 
-        self.num_objs = len(vocab['object_to_idx'])
+        #self.num_objs = len(vocab['object_to_idx']) #cm Azade
+        self.num_objs = len(vocab['object_idx_to_name'])
         self.num_preds = len(vocab['pred_idx_to_name'])
         self.obj_embeddings = nn.Embedding(self.num_objs, embedding_dim)
         self.pred_embeddings = nn.Embedding(self.num_preds, embedding_dim)
@@ -92,21 +150,31 @@ class Model(nn.Module):
         self.layout_to_image = define_G(netG_input_nc, output_nc, ngf, n_downsample_global, n_blocks_global, norm)
 
     def forward(self, gt_imgs, objs, triples, obj_to_img, boxes_gt=None, masks_gt=None, attributes=None,
-                gt_train=False, test_mode=False, use_gt_box=False, features=None):
+                gt_train=False, test_mode=False, use_gt_box=False, features=None, drop_box_idx=None, drop_feat_idx=None, src_image = None):
         O, T = objs.size(0), triples.size(0)
         obj_vecs, pred_vecs = self.scene_graph_to_vectors(objs, triples, attributes)
 
         box_vecs, mask_vecs, scene_layout_vecs, wrong_layout_vecs = \
-            self.create_components_vecs(gt_imgs, boxes_gt, obj_to_img, objs, obj_vecs, features)
+            self.create_components_vecs(gt_imgs, boxes_gt, obj_to_img, objs, obj_vecs, features
+                                        ,drop_box_idx=drop_box_idx, drop_feat_idx=drop_feat_idx, src_image=src_image)
 
         # Generate Boxes
         boxes_pred = self.box_net(box_vecs)
 
+        vg = True
         # Generate Masks
-        mask_scores = self.mask_net(mask_vecs.view(O, -1, 1, 1))
-        masks_pred = mask_scores.squeeze(1).sigmoid()
+        # Mask prediction network
+        masks_pred = None
+        if self.mask_net is not None:
+            mask_scores = self.mask_net(mask_vecs.view(O, -1, 1, 1))
+            masks_pred = mask_scores.squeeze(1).sigmoid()
 
         H, W = self.image_size
+        if vg:
+            layout_boxes = boxes_pred if boxes_gt is None else boxes_gt
+            #layout_masks = masks_pred if masks_gt is None else masks_gt
+            masks_gt =  masks_pred if masks_gt is None else masks_gt
+            #masks_pred = layout_boxes
 
         if test_mode:
             boxes = boxes_gt if use_gt_box else boxes_pred
@@ -142,7 +210,9 @@ class Model(nn.Module):
 
         return obj_vecs, pred_vecs
 
-    def create_components_vecs(self, imgs, boxes, obj_to_img, objs, obj_vecs, features):
+    def create_components_vecs(self, imgs, boxes, obj_to_img, objs, obj_vecs, features
+                               , drop_box_idx=None, drop_feat_idx=None, jitter=(None, None, None)
+                               , jitter_range=((-0.05, 0.05), (-0.05, 0.05)), src_image= None):
         O = objs.size(0)
         box_vecs = obj_vecs
         mask_vecs = obj_vecs
@@ -151,9 +221,53 @@ class Model(nn.Module):
             .view(O, self.mask_noise_dim)
         mask_vecs = torch.cat([mask_vecs, layout_noise], dim=1)
 
+        jitterFeat = False
         # create encoding
         if features is None:
+            if jitterFeat:
+                if obj_to_img is None:
+                    obj_to_img = torch.zeros(O, dtype=objs.dtype, device=objs.device)
+                    imgbox_idx = -1
+                else:
+                    imgbox_idx = torch.zeros(src_image.size(0), dtype=torch.int64)
+                    for i in range(src_image.size(0)):
+                        imgbox_idx[i] = (obj_to_img == i).nonzero()[-1]
+
+                add_jitter_bbox, add_jitter_layout, add_jitter_feats = jitter  # unpack
+                jitter_range_bbox, jitter_range_layout = jitter_range
+
+                # Bounding boxes ----------------------------------------------------------
+                box_ones = torch.ones([O, 1], dtype=boxes.dtype, device=boxes.device)
+
+                if drop_box_idx is not None:
+                    box_keep = drop_box_idx
+                else:
+                    # drop random box(es)
+                    box_keep = F.dropout(box_ones, self.p, True, False) * (1 - self.p)
+
+                # image obj cannot be dropped
+                box_keep[imgbox_idx, :] = 1
+
+                if add_jitter_bbox is not None:
+                    boxes_gt = jitter_bbox(boxes, p=add_jitter_bbox, noise_range=jitter_range_bbox,
+                                           eval_mode=True)  # uses default settings
+
+                boxes_prior = boxes * box_keep
+
+                # Object features ----------------------------------------------------------
+                if drop_feat_idx is not None:
+                    feats_keep = drop_feat_idx
+
+                else:
+                    feats_keep = F.dropout(box_ones, self.p, True, False) * (1 - self.p)
+                # print(feats_keep)
+                # image obj feats should be dropped
+                feats_keep[imgbox_idx, :] = 1  # should they be dropped or should they not?
+
+                obj_crop, src_image, generated = get_cropped_objs(src_image, boxes, obj_to_img,
+                                                                  box_keep, feats_keep, True)
             crops = crop_bbox_batch(imgs, boxes, obj_to_img, self.object_size)
+            #print(crops.shape, obj_crop.shape)
             obj_repr = self.repr_net(self.image_encoder(crops))
         else:
             # Only in inference time
@@ -162,7 +276,8 @@ class Model(nn.Module):
                 if feature is not None:
                     obj_repr[ind, :] = feature
         # create one-hot vector for label map
-        one_hot_size = (O, self.num_objs)
+        #obj_repr = obj_repr[:,:-1]
+        one_hot_size = (O, self.num_objs )
         one_hot_obj = torch.zeros(one_hot_size, dtype=obj_repr.dtype, device=obj_repr.device)
         one_hot_obj = one_hot_obj.scatter_(1, objs.view(-1, 1).long(), 1.0)
         layout_vecs = torch.cat([one_hot_obj, obj_repr], dim=1)
@@ -214,7 +329,8 @@ class Model(nn.Module):
                 sg['relationships'].append([j, '__in_image__', image_idx])
 
             for obj in sg['objects']:
-                obj_idx = self.vocab['object_to_idx'][str(self.vocab['object_name_to_idx'][obj])]
+                obj_idx = self.vocab['object_name_to_idx'].get(obj, None)
+                #self.vocab['object_to_idx'][str(self.vocab['object_name_to_idx'][obj])] #cm Azade
                 if obj_idx is None:
                     raise ValueError('Object "%s" not in vocab' % obj)
                 objs.append(obj_idx)

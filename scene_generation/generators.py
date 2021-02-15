@@ -51,8 +51,8 @@ class AppearanceEncoder(nn.Module):
 def define_G(input_nc, output_nc, ngf, n_downsample_global=3, n_blocks_global=9, norm='instance'):
     norm_layer = get_norm_layer(norm_type=norm)
     netG = GlobalGenerator(input_nc, output_nc, ngf, n_downsample_global, n_blocks_global, norm_layer)
-    assert (torch.cuda.is_available())
-    netG.cuda()
+    #assert (torch.cuda.is_available())
+    netG.cuda() #cuda Azade
     netG.apply(weights_init)
     return netG
 
@@ -84,7 +84,7 @@ class GlobalGenerator(nn.Module):
             model += [nn.ConvTranspose2d(ngf * mult, int(ngf * mult / 2), kernel_size=3, stride=2, padding=1,
                                          output_padding=1),
                       norm_layer(int(ngf * mult / 2)), activation]
-        model += [nn.ReflectionPad2d(3), nn.Conv2d(ngf, output_nc, kernel_size=7, padding=0), nn.Tanh()]
+        model += [nn.ReflectionPad2d(3), nn.Conv2d(ngf, output_nc, kernel_size=7, padding=0)] #, nn.Tanh()
         self.model = nn.Sequential(*model)
 
     def forward(self, input):

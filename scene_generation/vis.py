@@ -134,7 +134,7 @@ def draw_scene_graph(objs, triples, vocab=None, **kwargs):
         assert torch.is_tensor(triples)
         objs_list, triples_list = [], []
         for i in range(objs.size(0)):
-            objs_list.append(vocab['object_to_idx'][vocab['object_idx_to_name'][objs[i].item()]])
+            objs_list.append(vocab['object_idx_to_name'][objs[i].item()]) #vocab['object_to_idx'][
         for i in range(triples.size(0)):
             s = triples[i, 0].item()
             p = vocab['pred_idx_to_name'][triples[i, 1].item()]

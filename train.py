@@ -8,12 +8,13 @@ from torch.utils.data import DataLoader
 
 from scene_generation.args import get_args
 from scene_generation.data.coco import CocoSceneGraphDataset, coco_collate_fn
+from scene_generation.data.vg import VgSceneGraphDataset, vg_collate_fn
+
 from scene_generation.data.coco_panoptic import CocoPanopticSceneGraphDataset, coco_panoptic_collate_fn
 from scene_generation.metrics import jaccard
 from scene_generation.trainer import Trainer
 
 from scripts.inception_score import InceptionScore
-
 
 def build_coco_dsets(args):
     dset_kwargs = {
@@ -56,13 +57,44 @@ def build_coco_dsets(args):
 
     return vocab, train_dset, val_dset
 
+def build_vg_dsets(args):
+  print("building vg")
+  with open(args.vocab_json, 'r') as f:
+    vocab = json.load(f)
+  dset_kwargs = {
+    'vocab': vocab,
+    'h5_path': args.train_h5,
+    'image_dir': args.vg_image_dir,
+    'image_size': args.image_size,
+    'max_samples': args.num_train_samples,
+    'max_objects': args.max_objects_per_image,
+    'use_orphaned_objects': args.vg_use_orphaned_objects,
+    'include_relationships': args.include_relationships,
+  }
+  train_dset = VgSceneGraphDataset(**dset_kwargs)
+  iter_per_epoch = len(train_dset) // args.batch_size
+  print('There are %d iterations per epoch' % iter_per_epoch)
 
-def build_loaders(args):
-    vocab, train_dset, val_dset = build_coco_dsets(args)
-    if args.is_panoptic:
-        collate_fn = coco_panoptic_collate_fn
-    else:
-        collate_fn = coco_collate_fn
+  dset_kwargs['h5_path'] = args.val_h5
+  del dset_kwargs['max_samples']
+  val_dset = VgSceneGraphDataset(**dset_kwargs)
+
+  dset_kwargs['h5_path'] = args.test_h5
+  test_dset = VgSceneGraphDataset(**dset_kwargs)
+
+  return vocab, train_dset, val_dset, test_dset
+
+def build_loaders(args, evaluating=False):
+    if args.dataset == 'vg':
+        vocab, train_dset, val_dset, test_dset = build_vg_dsets(args)
+        collate_fn = vg_collate_fn
+    elif args.dataset == 'coco':
+        vocab, train_dset, val_dset = build_coco_dsets(args)
+        test_loader = []
+        if args.is_panoptic:
+            collate_fn = coco_panoptic_collate_fn
+        else:
+            collate_fn = coco_collate_fn
 
     loader_kwargs = {
         'batch_size': args.batch_size,
@@ -74,8 +106,12 @@ def build_loaders(args):
 
     loader_kwargs['shuffle'] = args.shuffle_val
     val_loader = DataLoader(val_dset, **loader_kwargs)
-    return vocab, train_loader, val_loader
 
+    if evaluating:
+        test_loader = DataLoader(test_dset, **loader_kwargs)
+        return vocab, train_loader, val_loader, test_loader
+    else:
+        return vocab, train_loader, val_loader
 
 def check_model(args, loader, model, inception_score, use_gt):
     fid = None
@@ -85,8 +121,20 @@ def check_model(args, loader, model, inception_score, use_gt):
     inception_score.clean()
     with torch.no_grad():
         for batch in loader:
-            batch = [tensor.cuda() for tensor in batch]
-            imgs, objs, boxes, masks, triples, obj_to_img, triple_to_img, attributes = batch
+            batch = [tensor.to(args.device) for tensor in batch] #cuda Azade
+            if len(batch) == 6:
+                imgs, objs, boxes, triples, obj_to_img, triple_to_img = batch
+            elif len(batch) == 7:
+                imgs, objs, boxes, masks, triples, obj_to_img, triple_to_img = batch
+            elif len(batch) == 12:
+                imgs, objs, boxes, triples, obj_to_img, triple_to_img, \
+                objs_r, boxes_r, triples_r, obj_to_img_r, triple_to_img_r, imgs_in = batch
+            elif len(batch) == 13:
+                imgs, objs, boxes, triples, obj_to_img, triple_to_img, attributes, \
+                objs_r, boxes_r, triples_r, obj_to_img_r, triple_to_img_r, imgs_in = batch
+                masks = None
+            else:
+                assert False
 
             # Run the model as it has been run during training
             if use_gt:
@@ -165,6 +213,7 @@ def get_checkpoint(args, vocab):
 
 def main(args):
     print(args)
+    torch.cuda.set_device(0) #Azade
     vocab, train_loader, val_loader = build_loaders(args)
     t, epoch, checkpoint = get_checkpoint(args, vocab)
     trainer = Trainer(args, vocab, checkpoint)
@@ -174,7 +223,7 @@ def main(args):
         with open(os.path.join(args.output_dir, 'args.json'), 'w') as outfile:
             json.dump(vars(args), outfile)
 
-    inception_score = InceptionScore(cuda=True, batch_size=args.batch_size, resize=True)
+    inception_score = InceptionScore(cuda=True, batch_size=args.batch_size, resize=True) #cuda Azade
     train_results = check_model(args, val_loader, trainer.model, inception_score, use_gt=True)
     t_avg_iou, t_inception_mean, t_inception_std, _ = train_results
     index = int(t / args.print_every)
@@ -190,7 +239,19 @@ def main(args):
         for batch in train_loader:
             t += 1
             batch = [tensor.cuda() for tensor in batch]
-            imgs, objs, boxes, masks, triples, obj_to_img, triple_to_img, attributes = batch
+            if len(batch) == 6:
+                imgs, objs, boxes, triples, obj_to_img, triple_to_img = batch
+            elif len(batch) == 7:
+                imgs, objs, boxes, masks, triples, obj_to_img, triple_to_img = batch
+            elif len(batch) == 12:
+                imgs, objs, boxes, triples, obj_to_img, triple_to_img, \
+                objs_r, boxes_r, triples_r, obj_to_img_r, triple_to_img_r, imgs_in = batch
+            elif len(batch) == 13:
+                imgs, objs, boxes, triples, obj_to_img, triple_to_img, attributes, \
+                objs_r, boxes_r, triples_r, obj_to_img_r, triple_to_img_r, imgs_in = batch
+                masks = None
+            else:
+                assert False
 
             use_gt = random.randint(0, 1) != 0
             if not use_gt:

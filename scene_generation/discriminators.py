@@ -21,7 +21,7 @@ class AcDiscriminator(nn.Module):
         }
         cnn, D = build_cnn(**cnn_kwargs)
         self.cnn = nn.Sequential(cnn, GlobalAvgPool(), nn.Linear(D, 1024))
-        num_objects = len(vocab['object_to_idx'])
+        num_objects = len(vocab['object_idx_to_name']) #len(vocab['object_to_idx']) #cm Azade
 
         self.real_classifier = nn.Linear(1024, 1)
         self.obj_classifier = nn.Linear(1024, num_objects)
@@ -67,8 +67,8 @@ def define_D(input_nc, ndf, n_layers_D, norm='instance', use_sigmoid=False, num_
     norm_layer = get_norm_layer(norm_type=norm)
     netD = MultiscaleDiscriminator(input_nc, ndf, n_layers_D, norm_layer, use_sigmoid, num_D)
     # print(netD)
-    assert (torch.cuda.is_available())
-    netD.cuda()
+    assert (torch.cuda.is_available()) # #cuda Azade
+    netD.cuda() #cuda Azade
     netD.apply(weights_init)
     return netD
 
@@ -78,8 +78,8 @@ def define_mask_D(input_nc, ndf, n_layers_D, norm='instance', use_sigmoid=False,
     norm_layer = get_norm_layer(norm_type=norm)
     netD = MultiscaleMaskDiscriminator(input_nc, ndf, n_layers_D, norm_layer, use_sigmoid, num_D,
                                        num_objects)
-    assert (torch.cuda.is_available())
-    netD.cuda()
+    assert (torch.cuda.is_available()) #cuda Azade
+    netD.cuda() #cuda Azade
     netD.apply(weights_init)
     return netD
 

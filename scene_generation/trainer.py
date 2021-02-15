@@ -16,7 +16,8 @@ class Trainer:
     def __init__(self, args, vocab, checkpoint):
         self.vocab = vocab
         self.args = args
-        self.num_obj = len(vocab['object_to_idx'])
+        #self.num_obj = len(vocab['object_to_idx']) #cm Azade
+        self.num_obj = len(vocab['object_idx_to_name'])
         print(args.output_dir)
         self.writer = SummaryWriter(args.output_dir)
         self.colors = torch.randint(0, 256, [self.num_obj, 3]).float()
@@ -51,7 +52,7 @@ class Trainer:
                 'rep_size': args.rep_size,
             }
             checkpoint['model_kwargs'] = model_kwargs
-        self.model = model = Model(**model_kwargs).to('cuda')
+        self.model = model = Model(**model_kwargs).to(args.device) #cuda Azade
         # model.type(torch.cuda.FloatTensor)
 
         self.criterionVGG = VGGLoss() if args.vgg_features_weight > 0 else None
@@ -74,7 +75,7 @@ class Trainer:
                     'object_size': args.crop_size,
                 }
                 checkpoint['d_obj_kwargs'] = d_obj_kwargs
-            obj_discriminator = AcCropDiscriminator(**d_obj_kwargs).to('cuda')
+            obj_discriminator = AcCropDiscriminator(**d_obj_kwargs).to(args.device) #cuda Azade
             # obj_discriminator.type(torch.cuda.FloatTensor)
             obj_discriminator.train()
             optimizer_d_obj = torch.optim.Adam(obj_discriminator.parameters(), lr=args.learning_rate,
@@ -100,7 +101,7 @@ class Trainer:
                     'num_objects': self.num_obj
                 }
                 checkpoint['d_mask_kwargs'] = d_mask_kwargs
-            mask_discriminator = define_mask_D(**d_mask_kwargs).to('cuda')
+            mask_discriminator = define_mask_D(**d_mask_kwargs).to(args.device) #cuda Azade
             # mask_discriminator.type(torch.cuda.FloatTensor)
             mask_discriminator.train()
             optimizer_d_mask = torch.optim.Adam(mask_discriminator.parameters(), lr=args.mask_learning_rate,
@@ -127,7 +128,7 @@ class Trainer:
                 'num_D': args.num_D,
             }
             checkpoint['d_img_kwargs'] = d_img_kwargs
-        self.netD = netD = define_D(**d_img_kwargs).to('cuda')
+        self.netD = netD = define_D(**d_img_kwargs).to(args.device) #cuda Azade
         # netD.type(torch.cuda.FloatTensor)
         netD.train()
         self.optimizer_d_img = torch.optim.Adam(list(netD.parameters()), lr=args.learning_rate,

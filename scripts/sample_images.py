@@ -10,6 +10,8 @@ from torch.utils.data import DataLoader
 from scene_generation.data import imagenet_deprocess_batch
 from scene_generation.data.coco_panoptic import CocoPanopticSceneGraphDataset, coco_panoptic_collate_fn
 from scene_generation.data.coco import CocoSceneGraphDataset, coco_collate_fn
+from scene_generation.data.vg import VgSceneGraphDataset, vg_collate_fn, vg_collate_fn_remove
+
 from scene_generation.data.utils import split_graph_batch
 from scene_generation.vis import draw_scene_graph
 from scene_generation.metrics import jaccard
@@ -22,8 +24,8 @@ parser.add_argument('--checkpoint_list', default=None)
 parser.add_argument('--model_mode', default='eval', choices=['train', 'eval'])
 
 # Shared dataset options
-parser.add_argument('--dataset', default='coco')
-parser.add_argument('--image_size', default=(128, 128), type=int_tuple)
+parser.add_argument('--dataset', default='vg')
+parser.add_argument('--image_size', default=(64, 64), type=int_tuple)
 parser.add_argument('--batch_size', default=24, type=int)
 parser.add_argument('--shuffle', default=False, type=bool_flag)
 parser.add_argument('--loader_num_workers', default=4, type=int)
@@ -42,13 +44,21 @@ parser.add_argument('--grid_size', default=25, type=int)
 
 parser.add_argument('--output_dir', default='output')
 
-COCO_DIR = os.path.expanduser('../data/coco')
+COCO_DIR = os.path.expanduser('/media/azadef/MyHDD/Code/cleanGCN/smsg_v2/datasets/coco')
 parser.add_argument('--coco_image_dir',
                     default=os.path.join(COCO_DIR, 'images/val2017'))
 parser.add_argument('--instances_json',
                     default=os.path.join(COCO_DIR, 'annotations/instances_val2017.json'))
 parser.add_argument('--stuff_json',
                     default=os.path.join(COCO_DIR, 'annotations/stuff_val2017.json'))
+
+# For VG
+VG_DIR = os.path.expanduser('../sg2im/datasets/vg')
+parser.add_argument('--vg_h5', default=os.path.join(VG_DIR, 'test.h5'))
+parser.add_argument('--vg_image_dir',
+        default=os.path.join(VG_DIR, 'images'))
+parser.add_argument('--mode', default='reposition',
+                    choices=['auto', 'replace', 'reposition', 'remove'])
 
 
 def build_coco_dset(args, checkpoint):
@@ -97,14 +107,37 @@ def build_coco_panoptic_dset(args, checkpoint):
     dset = CocoPanopticSceneGraphDataset(**dset_kwargs)
     return dset
 
+def build_vg_dset(args, checkpoint):
+  vocab = checkpoint['model_kwargs']['vocab']
+  dset_kwargs = {
+    'vocab': vocab,
+    'h5_path': args.vg_h5,
+    'image_dir': args.vg_image_dir,
+    'image_size': args.image_size,
+    'max_samples': args.num_samples,
+    'max_objects': checkpoint['args']['max_objects_per_image'],
+    'use_orphaned_objects': checkpoint['args']['vg_use_orphaned_objects'],
+    'mode': args.mode
+  }
+  dset = VgSceneGraphDataset(**dset_kwargs)
+  return dset
+
 
 def build_loader(args, checkpoint, is_panoptic):
-    if is_panoptic:
-        dset = build_coco_panoptic_dset(args, checkpoint)
-        collate_fn = coco_panoptic_collate_fn
-    else:
-        dset = build_coco_dset(args, checkpoint)
-        collate_fn = coco_collate_fn
+    if args.dataset == 'coco':
+        if is_panoptic:
+            dset = build_coco_panoptic_dset(args, checkpoint)
+            collate_fn = coco_panoptic_collate_fn
+        else:
+            dset = build_coco_dset(args, checkpoint)
+            collate_fn = coco_collate_fn
+
+    elif args.dataset == 'vg':
+        dset = build_vg_dset(args, checkpoint)
+        if args.mode == 'remove':
+            collate_fn = vg_collate_fn
+        else:
+            collate_fn = vg_collate_fn_remove
 
     loader_kwargs = {
         'batch_size': args.batch_size,
@@ -160,6 +193,8 @@ def run_model(args, checkpoint, output_dir, loader=None):
         vocab = checkpoint['model_kwargs']['vocab']
         model = build_model(args, checkpoint)
         if loader is None:
+            if args.dataset == "vg":
+                vocab['is_panoptic'] = False #Azade
             loader = build_loader(args, checkpoint, vocab['is_panoptic'])
 
         img_dir = makedir(output_dir, 'images')
@@ -175,7 +210,21 @@ def run_model(args, checkpoint, output_dir, loader=None):
         num_objs = model.num_objs
         colors = torch.randint(0, 256, [num_objs, 3]).float()
         for batch in loader:
-            imgs, objs, boxes, masks, triples, obj_to_img, triple_to_img, attributes = [x.cuda() for x in batch]
+
+            if len(batch) == 6:
+                imgs, objs, boxes, triples, obj_to_img, triple_to_img = [x.cuda() for x in batch]
+            elif len(batch) == 7:
+                imgs, objs, boxes, masks, triples, obj_to_img, triple_to_img = [x.cuda() for x in batch]
+            elif len(batch) == 8:
+                imgs, objs, boxes, masks, triples, obj_to_img, triple_to_img, attributes = [x.cuda() for x in batch]
+            elif len(batch) == 12:
+                imgs, objs, boxes, triples, obj_to_img, triple_to_img, \
+                objs_r, boxes_r, triples_r, obj_to_img_r, triple_to_img_r, imgs_in = [x.cuda() for x in batch]
+            elif len(batch) == 13:
+                imgs, objs, boxes, triples, obj_to_img, triple_to_img, attributes, \
+                objs_r, boxes_r, triples_r, obj_to_img_r, triple_to_img_r, imgs_in = [x.cuda() for x in batch]
+            else:
+                assert False
 
             imgs_gt = imagenet_deprocess_batch(imgs)
             masks_gt = None
@@ -265,9 +314,11 @@ def run_model(args, checkpoint, output_dir, loader=None):
 
 if __name__ == '__main__':
     args = parser.parse_args()
+    #
     if args.checkpoint is None:
         raise ValueError('Must specify --checkpoint')
 
-    checkpoint = torch.load(args.checkpoint)
+    checkpoint = torch.load(args.checkpoint,map_location='cuda:0')
+    #torch.cuda.set_device(1)
     print('Loading model from ', args.checkpoint)
     run_model(args, checkpoint, args.output_dir)

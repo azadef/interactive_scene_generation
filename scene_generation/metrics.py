@@ -24,7 +24,7 @@ def intersection(bbox_pred, bbox_gt):
     return inter[:, 0] * inter[:, 1]
 
 
-def jaccard(bbox_pred, bbox_gt):
+def jaccard2(bbox_pred, bbox_gt):
     inter = intersection(bbox_pred, bbox_gt)
     area_pred = (bbox_pred[:, 2] - bbox_pred[:, 0]) * (bbox_pred[:, 3] -
                                                        bbox_pred[:, 1])
@@ -33,3 +33,13 @@ def jaccard(bbox_pred, bbox_gt):
     union = area_pred + area_gt - inter
     iou = torch.div(inter, union)
     return torch.sum(iou), (iou > 0.5).sum().item(), (iou > 0.3).sum().item()
+
+def jaccard(bbox_pred, bbox_gt):
+  inter = intersection(bbox_pred, bbox_gt)
+  area_pred = (bbox_pred[:, 2] - bbox_pred[:, 0]) * (bbox_pred[:, 3] -
+      bbox_pred[:, 1])
+  area_gt = (bbox_gt[:, 2] - bbox_gt[:, 0]) * (bbox_gt[:, 3] -
+      bbox_gt[:, 1])
+  union = area_pred + area_gt - inter
+  iou = torch.div(inter, union)
+  return torch.sum(iou)
